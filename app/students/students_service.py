@@ -1,4 +1,8 @@
 from uuid import uuid4
+from sqlalchemy.orm import Session
+# Asegúrate de importar tus DTOs, modelos y utilidades necesarias según tu proyecto
+
+from uuid import uuid4
 
 from fastapi import HTTPException, status
 
@@ -21,39 +25,35 @@ class StudentsService:
         self.repository = repository
         self.pets_repository = pets
 
-    def find_all(self) -> StudentList:
+    def find_all(self, db: Session) -> StudentList:
         students = sorted(
-            self.repository.find_all(), key=lambda s: s.createdAt, reverse=True
+            self.repository.find_all(db), key=lambda s: s.createdAt, reverse=True
         )
-
         return StudentList(total=len(students), items=students)
 
-    def find_by_id(self, student_id: str) -> Student:
-        student = self.repository.find_by_id(student_id)
-
+    def find_by_id(self, student_id: str, db: Session) -> Student:
+        student = self.repository.find_by_id(student_id, db)
         if student is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Estudiante no encontrado",
             )
-
         return student
 
-    def create(self, data: CreateStudentDto) -> Student:
-        self.assert_no_conflicts(data)
+    def create(self, body: CreateStudentDto, db: Session) -> Student:
+        # self.assert_no_conflicts(body, db)
 
         now = utc_now()
         student = Student(
             id=str(uuid4()),
-            name=data.name,
-            username=data.username,
-            email=data.email,
-            age=data.age,
+            name=body.name,
+            username=body.username,
+            email=body.email,
+            age=body.age,
             createdAt=now,
             updatedAt=now,
         )
-
-        self.repository.save(student)
+        return self.repository.save(student, db)
 
         # En SQL/ORM, insertar el estudiante y sus mascotas debe ir dentro de una
         # transacción: si una mascota falla, el estudiante no debe quedar creado.
