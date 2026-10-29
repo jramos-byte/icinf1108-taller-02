@@ -2,13 +2,18 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
-from app.pets.pets_repository import PetsRepository, pets_repository
-from app.pets.pets_schemas import Pet
-from app.shared.datetimes import utc_now
-from app.shared.exceptions import conflict
-from app.shared.types import FieldErrors
+from app.shared.in_memory_store import store_instance
 from app.students.students_repository import StudentsRepository
-from app.students.students_schemas import (
+from app.pets.pets_repository import PetsRepository
+from app.shared.exceptions import HTTPException
+
+from ..pets.pets_repository import PetsRepository, pets_repository
+from ..pets.pets_schemas import Pet
+from ..shared.datetimes import utc_now
+from ..shared.exceptions import conflict
+from ..shared.types import FieldErrors
+from .students_repository import StudentsRepository
+from .students_schemas import (
     CreateStudentDto,
     Student,
     StudentList,
@@ -120,6 +125,45 @@ class StudentsService:
 
         if errors:
             raise conflict(errors)
+        
+        def __init__(self):
+            self.student_repo = StudentsRepository()
+        self.pet_repo = PetsRepository()
+
+    def create_student_with_pet(self, student_data: dict, pet_data: dict):
+        """
+        Crea un estudiante y su mascota simultáneamente.
+        Si la creación de la mascota falla, el estudiante no se guarda (Rollback).
+        """
+        with store_instance.transaction():
+            new_student = self.student_repo.create(student_data)
+            
+            pet_data["student_id"] = new_student["id"]
+            
+            try:
+                new_pet = self.pet_repo.create(pet_data)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Fallo al crear la mascota asociada: {str(e)}")
+            
+            return {"student": new_student, "pet": new_pet}
+
+    def delete_student_cascade(self, student_id: str):
+        """
+        Elimina un estudiante en cascada junto con todas sus mascotas asociadas.
+        Si falla la eliminación de alguna mascota o del estudiante, nada se elimina.
+        """
+        with store_instance.transaction():
+            all_pets = self.pet_repo.find_all()
+            for pet in all_pets:
+                if pet.get("student_id") == student_id:
+                    self.pet_repo.delete(pet["id"])
+            
+            try:
+                self.student_repo.delete(student_id)
+            except Exception as e:
+                raise HTTPException(status_code=404, detail=f"No se pudo completar la eliminación en cascada: {str(e)}")
+            
+            return {"message": f"Estudiante {student_id} y sus mascotas eliminados exitosamente."}
 
 
 students_repository = StudentsRepository()

@@ -212,6 +212,10 @@ class UpdateStudentDto(BaseModel):
             )
         )
         return v
+                
+class StudentWithPetCreate(BaseModel):
+    student: CreateStudentDto
+    pet: CreatePetDto
 
 
 def _raise_validation(messages: list[str]) -> None:

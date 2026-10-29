@@ -1,24 +1,24 @@
-from app.pets.pets_schemas import Pet
-from app.shared.in_memory_store import InMemoryStore
+from . import pets_schemas
+from ..shared import in_memory_store
 
 
 class PetsRepository:
     def __init__(self) -> None:
-        self._store: InMemoryStore[Pet] = InMemoryStore()
+        self._store: in_memory_store.InMemoryStore[pets_schemas.Pet] = in_memory_store.InMemoryStore()
 
-    def find_all_by_student(self, student_id: str) -> list[Pet]:
+    def find_all_by_student(self, student_id: str) -> list[pets_schemas.Pet]:
         return self._store.find_by(lambda pet: pet.studentId == student_id)
 
-    def find_by_id(self, pet_id: str) -> Pet | None:
+    def find_by_id(self, pet_id: str) -> pets_schemas.Pet | None:
         return self._store.get(pet_id)
 
-    def find_by_student_and_name(self, student_id: str, name: str) -> Pet | None:
+    def find_by_student_and_name(self, student_id: str, name: str) -> pets_schemas.Pet | None:
         matches = self._store.find_by(
             lambda pet: pet.studentId == student_id and pet.name == name
         )
         return matches[0] if matches else None
 
-    def save(self, pet: Pet) -> Pet:
+    def save(self, pet: pets_schemas.Pet) -> pets_schemas.Pet:
         self._store.set(pet)
         return pet
 

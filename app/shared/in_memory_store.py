@@ -1,34 +1,46 @@
-from collections.abc import Callable
-from typing import Protocol
+import copy
+from typing import Dict, Any
 
+class InMemoryStore:
+    def __init__(self):
+        self._data: Dict[str, Any] = {
+            "students": {},
+            "pets": {}
+        }
+        self._backup: Dict[str, Any] = None
 
-class HasId(Protocol):
-    id: str
+    def begin_transaction(self):
+        """Inicia una transacción guardando el estado actual."""
+        if self._backup is not None:
+            raise Exception("Ya hay una transaccion activa en este hilo.")
+        self._backup = copy.deepcopy(self._data)
 
+    def commit(self):
+        """Confirma los cambios eliminando el respaldo."""
+        if self._backup is None:
+            raise Exception("No hay ninguna transaccion activa para confirmar.")
+        self._backup = None
 
-type Predicate[T] = Callable[[T], bool]
+    def rollback(self):
+        """Revierte el estado al momento exacto de begin_transaction."""
+        if self._backup is None:
+            raise Exception("No hay ninguna transaccion activa para revertir.")
+        self._data = copy.deepcopy(self._backup)
+        self._backup = None
 
+    def transaction(self):
+        class TransactionContext:
+            def __init__(self, store):
+                self.store = store
+            def __enter__(self):
+                self.store.begin_transaction()
+                return self.store
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if exc_type is not None:
+                    self.store.rollback()
+                else:
+                    self.store.commit()
+                return False 
+        return TransactionContext(self)
 
-class InMemoryStore[T: HasId]:
-    def __init__(self) -> None:
-        self._items: dict[str, T] = {}
-
-    def set(self, item: T) -> None:
-        self._items[item.id] = item
-
-    def get(self, item_id: str) -> T | None:
-        return self._items.get(item_id)
-
-    def delete(self, item_id: str) -> bool:
-        return self._items.pop(item_id, None) is not None
-
-    def find_all(self) -> list[T]:
-        return list(self._items.values())
-
-    def find_by(self, predicate: Predicate[T]) -> list[T]:
-        return [item for item in self.find_all() if predicate(item)]
-
-    def delete_by(self, predicate: Predicate[T]) -> None:
-        for item_id, item in list(self._items.items()):
-            if predicate(item):
-                del self._items[item_id]
+store_instance = InMemoryStore()
