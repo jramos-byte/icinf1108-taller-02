@@ -1,17 +1,14 @@
 from uuid import uuid4
-from sqlalchemy.orm import Session
-# Asegúrate de importar tus DTOs, modelos y utilidades necesarias según tu proyecto
-
-from uuid import uuid4
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
-from app.pets.pets_repository import PetsRepository, pets_repository
-from app.pets.pets_schemas import Pet
+from app.models import Estudiante, Mascota
 from app.shared.datetimes import utc_now
 from app.shared.exceptions import conflict
 from app.shared.types import FieldErrors
-from app.students.students_repository import StudentsRepository
+from app.students.students_repository import StudentsRepository, students_repository
 from app.students.students_schemas import (
     CreateStudentDto,
     Student,
@@ -21,13 +18,12 @@ from app.students.students_schemas import (
 
 
 class StudentsService:
-    def __init__(self, repository: StudentsRepository, pets: PetsRepository) -> None:
+    def __init__(self, repository: StudentsRepository) -> None:
         self.repository = repository
-        self.pets_repository = pets
 
     def find_all(self, db: Session) -> StudentList:
         students = sorted(
-            self.repository.find_all(db), key=lambda s: s.createdAt, reverse=True
+            self.repository.find_all(db), key=lambda student: student.createdAt, reverse=True
         )
         return StudentList(total=len(students), items=students)
 
@@ -41,86 +37,93 @@ class StudentsService:
         return student
 
     def create(self, body: CreateStudentDto, db: Session) -> Student:
-        # self.assert_no_conflicts(body, db)
-
+        self.assert_no_conflicts(body, db)
+        pet_names = [pet.name for pet in body.pets]
+        if len(pet_names) != len(set(pet_names)):
+            raise conflict(
+                {"name": {"message": "Ya tienes una mascota con ese nombre"}}
+            )
         now = utc_now()
-        student = Student(
+        student = Estudiante(
             id=str(uuid4()),
             name=body.name,
             username=body.username,
-            email=body.email,
+            email=str(body.email),
             age=body.age,
             createdAt=now,
             updatedAt=now,
         )
-        return self.repository.save(student, db)
-
-        # En SQL/ORM, insertar el estudiante y sus mascotas debe ir dentro de una
-        # transacción: si una mascota falla, el estudiante no debe quedar creado.
-        for pet_data in data.pets:
-            existing = self.pets_repository.find_by_student_and_name(
-                student.id, pet_data.name
-            )
-
-            if existing is not None:
-                raise conflict(
-                    {"name": {"message": "Ya tienes una mascota con ese nombre"}}
-                )
-
-            pet_now = utc_now()
-            pet = Pet(
+        student.pets = [
+            Mascota(
                 id=str(uuid4()),
-                studentId=student.id,
-                name=pet_data.name,
-                species=pet_data.species,
-                age=pet_data.age,
-                createdAt=pet_now,
-                updatedAt=pet_now,
+                name=pet.name,
+                species=pet.species,
+                age=pet.age,
+                createdAt=now,
+                updatedAt=now,
             )
-
-            self.pets_repository.save(pet)
-
+            for pet in body.pets
+        ]
+        try:
+            db.add(student)
+            db.commit()
+            db.refresh(student)
+        except IntegrityError as exc:
+            db.rollback()
+            raise conflict(self._conflict_errors(body, db)) from exc
         return student
 
-    def update(self, student_id: str, data: UpdateStudentDto) -> Student:
-        existing = self.find_by_id(student_id)
-        self.assert_no_conflicts(data, except_id=student_id)
-
-        updated = existing.model_copy(
-            update={
-                **data.model_dump(exclude_none=True),
-                "updatedAt": utc_now(),
-            }
-        )
-
-        return self.repository.save(updated)
-
-    def delete(self, student_id: str) -> Student:
-        existing = self.find_by_id(student_id)
-        self.repository.delete(student_id)
-
+    def update(
+        self, student_id: str, data: UpdateStudentDto, db: Session
+    ) -> Student:
+        existing = self.find_by_id(student_id, db)
+        self.assert_no_conflicts(data, db, except_id=student_id)
+        for field in ("name", "username", "email", "age"):
+            if field in data.model_fields_set:
+                value = getattr(data, field)
+                setattr(existing, field, str(value) if field == "email" and value else value)
+        existing.updatedAt = utc_now()
+        try:
+            db.commit()
+            db.refresh(existing)
+        except IntegrityError as exc:
+            db.rollback()
+            raise conflict(self._conflict_errors(data, db, except_id=student_id)) from exc
         return existing
+
+    def delete(self, student_id: str, db: Session) -> Student:
+        existing = self.find_by_id(student_id, db)
+        response = Student.model_validate(existing)
+        db.delete(existing)
+        db.commit()
+        return response
 
     def assert_no_conflicts(
         self,
         data: CreateStudentDto | UpdateStudentDto,
+        db: Session,
         except_id: str | None = None,
     ) -> None:
-        errors: FieldErrors = {}
-
-        if data.email:
-            existing = self.repository.find_by_email(data.email)
-            if existing and existing.id != except_id:
-                errors["email"] = {"message": "El correo electrónico ya está en uso"}
-
-        if data.username:
-            existing = self.repository.find_by_username(data.username)
-            if existing and existing.id != except_id:
-                errors["username"] = {"message": "El nombre de usuario ya está en uso"}
-
+        errors = self._conflict_errors(data, db, except_id)
         if errors:
             raise conflict(errors)
 
+    def _conflict_errors(
+        self,
+        data: CreateStudentDto | UpdateStudentDto,
+        db: Session,
+        except_id: str | None = None,
+    ) -> FieldErrors:
+        errors: FieldErrors = {}
+        if data.email:
+            existing = self.repository.find_by_email(str(data.email), db)
+            if existing and existing.id != except_id:
+                errors["email"] = {"message": "El correo electrónico ya está en uso"}
+        if data.username:
+            existing = self.repository.find_by_username(data.username, db)
+            if existing and existing.id != except_id:
+                errors["username"] = {"message": "El nombre de usuario ya está en uso"}
+        return errors
 
-students_repository = StudentsRepository()
-students_service = StudentsService(students_repository, pets_repository)
+
+students_service = StudentsService(students_repository)

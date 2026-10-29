@@ -1,36 +1,34 @@
 from uuid import uuid4
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
+from app.models import Mascota
 from app.pets.pets_repository import PetsRepository, pets_repository
 from app.pets.pets_schemas import CreatePetDto, Pet, PetList, UpdatePetDto
 from app.shared.datetimes import utc_now
 from app.shared.exceptions import conflict
-from app.students.students_service import StudentsService, students_service
+from app.students.students_repository import StudentsRepository, students_repository
 
 
 class PetsService:
-    def __init__(self, repository: PetsRepository, students: StudentsService) -> None:
+    def __init__(
+        self, repository: PetsRepository, students: StudentsRepository
+    ) -> None:
         self.repository = repository
-        self.students_service = students
+        self.students_repository = students
 
-    def find_all_for_student(self, student_id: str) -> PetList:
-        self.students_service.find_by_id(student_id)
-
-        pets = sorted(
-            self.repository.find_all_by_student(student_id),
-            key=lambda pet: pet.createdAt,
-            reverse=True,
-        )
-
+    def find_all_for_student(self, student_id: str, db: Session) -> PetList:
+        self._require_student(student_id, db)
+        pets = self.repository.find_all_by_student(student_id, db)
         return PetList(total=len(pets), items=pets)
 
-    def create(self, student_id: str, data: CreatePetDto) -> Pet:
-        self.students_service.find_by_id(student_id)
-        self.assert_no_conflicts(student_id, data)
-
+    def create(self, student_id: str, data: CreatePetDto, db: Session) -> Pet:
+        self._require_student(student_id, db)
+        self.assert_no_conflicts(student_id, data.name, db)
         now = utc_now()
-        pet = Pet(
+        pet = Mascota(
             id=str(uuid4()),
             studentId=student_id,
             name=data.name,
@@ -39,59 +37,69 @@ class PetsService:
             createdAt=now,
             updatedAt=now,
         )
+        try:
+            return self.repository.save(pet, db)
+        except IntegrityError as exc:
+            db.rollback()
+            raise conflict(
+                {"name": {"message": "Ya tienes una mascota con ese nombre"}}
+            ) from exc
 
-        return self.repository.save(pet)
+    def update(
+        self, student_id: str, pet_id: str, data: UpdatePetDto, db: Session
+    ) -> Pet:
+        existing = self.find_owned(student_id, pet_id, db)
+        if data.name is not None:
+            self.assert_no_conflicts(student_id, data.name, db, except_id=pet_id)
+        if data.name is not None:
+            existing.name = data.name
+        if data.species is not None:
+            existing.species = data.species
+        if "age" in data.model_fields_set:
+            existing.age = data.age
+        existing.updatedAt = utc_now()
+        try:
+            return self.repository.save(existing, db)
+        except IntegrityError as exc:
+            db.rollback()
+            raise conflict(
+                {"name": {"message": "Ya tienes una mascota con ese nombre"}}
+            ) from exc
 
-    def update(self, student_id: str, pet_id: str, data: UpdatePetDto) -> Pet:
-        existing = self.find_owned(student_id, pet_id)
-        self.assert_no_conflicts(student_id, data, except_id=pet_id)
+    def delete(self, student_id: str, pet_id: str, db: Session) -> Pet:
+        existing = self.find_owned(student_id, pet_id, db)
+        response = Pet.model_validate(existing)
+        self.repository.delete(existing, db)
+        return response
 
-        updated = existing.model_copy(
-            update={
-                **data.model_dump(exclude_none=True),
-                "updatedAt": utc_now(),
-            }
-        )
+    def delete_all_for_student(self, student_id: str, db: Session) -> None:
+        self.repository.delete_by_student(student_id, db)
 
-        return self.repository.save(updated)
-
-    def delete(self, student_id: str, pet_id: str) -> Pet:
-        existing = self.find_owned(student_id, pet_id)
-        self.repository.delete(pet_id)
-
-        return existing
-
-    def delete_all_for_student(self, student_id: str) -> None:
-        self.repository.delete_by_student(student_id)
-
-    def find_owned(self, student_id: str, pet_id: str) -> Pet:
-        self.students_service.find_by_id(student_id)
-
-        pet = self.repository.find_by_id(pet_id)
-
+    def find_owned(self, student_id: str, pet_id: str, db: Session) -> Mascota:
+        self._require_student(student_id, db)
+        pet = self.repository.find_by_id(pet_id, db)
         if pet is None or pet.studentId != student_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Mascota no encontrada",
             )
-
         return pet
 
+    def _require_student(self, student_id: str, db: Session) -> None:
+        if self.students_repository.find_by_id(student_id, db) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Estudiante no encontrado",
+            )
+
     def assert_no_conflicts(
-        self,
-        student_id: str,
-        data: CreatePetDto | UpdatePetDto,
-        except_id: str | None = None,
+        self, student_id: str, name: str, db: Session, except_id: str | None = None
     ) -> None:
-        if not data.name:
-            return
-
-        existing = self.repository.find_by_student_and_name(student_id, data.name)
-
-        if existing and existing.id != except_id:
+        existing = self.repository.find_by_student_and_name(student_id, name, db)
+        if existing is not None and existing.id != except_id:
             raise conflict(
                 {"name": {"message": "Ya tienes una mascota con ese nombre"}}
             )
 
 
-pets_service = PetsService(pets_repository, students_service)
+pets_service = PetsService(pets_repository, students_repository)
